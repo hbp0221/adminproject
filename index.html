@@ -476,34 +476,40 @@
       </div>
     </div>
   </main>
-  <footer>School Document Request &amp; Appointment System — data stored locally in your browser</footer>
+  <footer>School Document Request &amp; Appointment System — data is stored online and shared across devices</footer>
 </div>
 
-<script>
-/* ---------------- DATA LAYER (localStorage) ---------------- */
-const DB_KEY = 'oaqms_data_v1';
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js";
+import { getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js";
 
-function loadDB(){
-  let db = JSON.parse(localStorage.getItem(DB_KEY) || 'null');
-  if(!db){
-    db = {
-      users: [
-        {id:'u_admin', name:'System Admin', username:'admin', password:'admin123', role:'admin'}
-      ],
-      services: DEFAULT_SERVICES.slice(),
-      appointments: [],
-      queue: [],
-      queueCounter: 0,
-      notifications: []
-    };
-    saveDB(db);
-  }
-  if(!Array.isArray(db.notifications)){ db.notifications = []; saveDB(db); }
-  migrateLegacyUsers(db);
-  removeLegacyClinicServices(db);
-  restoreDefaultServicesIfEmpty(db);
-  return db;
-}
+const firebaseConfig = {
+  apiKey: "AIzaSyBvXbRa9waru5zde3ncKRySCcUYmgpDC1s",
+  authDomain: "school-document-request-32810.firebaseapp.com",
+  projectId: "school-document-request-32810",
+  storageBucket: "school-document-request-32810.firebasestorage.app",
+  messagingSenderId: "892700034719",
+  appId: "1:892700034719:web:ec9904394f3e698c7244aa"
+};
+
+const fdb = getFirestore(initializeApp(firebaseConfig));
+window.fb = {
+  setDoc: (col, id, data) => setDoc(doc(fdb, col, id), data),
+  deleteDoc: (col, id) => deleteDoc(doc(fdb, col, id)),
+  listen: (col, cb, errCb) => onSnapshot(collection(fdb, col), snap => {
+    if(snap.metadata.fromCache && snap.empty) return;   // wait for the real server answer
+    cb(snap.docs.map(d => d.data()));
+  }, errCb)
+};
+window.dispatchEvent(new Event('fb-ready'));
+</script>
+<script>
+/* ---------------- DATA LAYER (Firebase Firestore) ---------------- */
+// All data lives online in Firestore so every device sees the same requests.
+// DB is an in-memory copy that is kept in sync with the cloud: functions below change DB
+// and call saveDB(); Firestore listeners update DB whenever anything changes anywhere.
+const COLLECTIONS = ['users','services','appointments','queue','notifications'];
+const ALL_COLLECTIONS = [...COLLECTIONS, 'meta'];
 
 const DEFAULT_SERVICES = [
   {id:'s1', name:'School Prospectus'},
@@ -523,40 +529,95 @@ const DEFAULT_SERVICES = [
   {id:'s15', name:'Other Request (Specify in Notes)'}
 ];
 
-// Older versions stored accounts with an "email" field instead of "username";
-// backfill so existing browsers with saved data can still log in.
-function migrateLegacyUsers(db){
-  let changed = false;
-  db.users.forEach(u=>{
-    if(!u.username){
-      u.username = u.role==='admin' ? 'admin' : (u.email ? u.email.split('@')[0] : u.name.toLowerCase().replace(/\s+/g,'')) ;
-      changed = true;
-    }
+let DB = {users:[], services:[], appointments:[], queue:[], notifications:[], queueCounter:0};
+let DB_READY = false;
+let startupDone = false;
+const synced = new Map();       // 'collection/id' -> last JSON known to be in the cloud
+const loadedCols = new Set();
+
+function uid(prefix){ return prefix + '_' + Math.random().toString(36).slice(2,9); }
+function stable(v){
+  if(Array.isArray(v)) return '[' + v.map(stable).join(',') + ']';
+  if(v && typeof v === 'object') return '{' + Object.keys(v).sort().map(k=>JSON.stringify(k)+':'+stable(v[k])).join(',') + '}';
+  return JSON.stringify(v === undefined ? null : v);
+}
+function cleanCopy(o){ return JSON.parse(JSON.stringify(o)); }
+function cloudItems(col){ return col==='meta' ? [{id:'counters', queueCounter: DB.queueCounter}] : DB[col]; }
+
+function cloudError(err){
+  console.warn('Database error:', err);
+  showToast({type:'cancelled', title:'Not saved', message:'Could not reach the online database. Check your internet connection and try again.'});
+}
+
+// Sends only what changed since the last sync (new/edited items and deletions).
+function saveDB(){
+  if(!window.fb) return;
+  ALL_COLLECTIONS.forEach(col=>{
+    const seen = new Set();
+    cloudItems(col).forEach(item=>{
+      const key = col + '/' + item.id;
+      seen.add(key);
+      const data = cleanCopy(item);
+      const json = stable(data);
+      if(synced.get(key) !== json){
+        synced.set(key, json);
+        window.fb.setDoc(col, item.id, data).catch(cloudError);
+      }
+    });
+    [...synced.keys()].filter(k=>k.startsWith(col+'/') && !seen.has(k)).forEach(k=>{
+      synced.delete(k);
+      window.fb.deleteDoc(col, k.slice(col.length+1)).catch(cloudError);
+    });
   });
-  if(changed) saveDB(db);
 }
 
-// Earlier versions seeded clinic-style entries (e.g. "General Consultation"); strip
-// them out of existing browser data now that this app is school-document focused.
-const LEGACY_CLINIC_SERVICE_NAMES = ['general consultation','dental checkup','vaccination'];
-function removeLegacyClinicServices(db){
-  const before = db.services.length;
-  db.services = db.services.filter(s=>!LEGACY_CLINIC_SERVICE_NAMES.includes(s.name.trim().toLowerCase()));
-  if(db.services.length !== before) saveDB(db);
+// Passwords are never stored in plain text: only a salted SHA-256 hash is saved.
+async function hashPassword(username, password){
+  const bytes = new TextEncoder().encode('school-doc-v1:' + username + ':' + password);
+  const buf = await crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
 }
 
-// If every service got removed (e.g. admin deleted them all, or the legacy cleanup above
-// stripped a browser's only entries), restore the defaults so the request form isn't empty.
-function restoreDefaultServicesIfEmpty(db){
-  if(db.services.length === 0){
-    db.services = DEFAULT_SERVICES.slice();
-    saveDB(db);
+function startCloud(){
+  ALL_COLLECTIONS.forEach(col=>{
+    window.fb.listen(col, docs=>{
+      if(col === 'meta'){
+        const m = docs.find(d=>d.id==='counters');
+        if(m) DB.queueCounter = m.queueCounter || 0;
+      } else {
+        DB[col] = docs;
+      }
+      [...synced.keys()].filter(k=>k.startsWith(col+'/')).forEach(k=>synced.delete(k));
+      docs.forEach(d=>synced.set(col+'/'+d.id, stable(d)));
+      loadedCols.add(col);
+      if(!startupDone){
+        if(loadedCols.size === ALL_COLLECTIONS.length){ startupDone = true; finishStartup(); }
+      } else if(DB_READY){
+        onDataChanged();
+      }
+    }, err=>{
+      console.warn('Database listener error:', err);
+      showAuthMsg('Cannot reach the online database. Check your internet connection and the Firestore rules, then refresh.','error');
+    });
+  });
+}
+
+// First run only: create the default admin account and the list of document types.
+async function finishStartup(){
+  if(!DB.users.some(u=>u.id==='u_admin')){
+    DB.users.push({id:'u_admin', name:'System Admin', username:'admin', passwordHash: await hashPassword('admin','admin123'), role:'admin'});
+  }
+  if(DB.services.length === 0) DB.services = DEFAULT_SERVICES.map(s=>({...s}));
+  saveDB();
+  DB_READY = true;
+  clearMsg('authMsg');
+  if(currentUser){
+    const fresh = DB.users.find(u=>u.id===currentUser.id);
+    if(fresh){ currentUser = fresh; enterApp(); }
+    else { currentUser = null; sessionStorage.removeItem('oaqms_current_user'); }
   }
 }
-function saveDB(db){ localStorage.setItem(DB_KEY, JSON.stringify(db)); }
-function uid(prefix){ return prefix + '_' + Math.random().toString(36).slice(2,9); }
 
-let DB = loadDB();
 let currentUser = JSON.parse(sessionStorage.getItem('oaqms_current_user') || 'null');
 
 /* ---------------- RENDER HELPERS ---------------- */
@@ -610,8 +671,9 @@ function switchAuthTab(tab){
   clearMsg('authMsg');
 }
 
-function handleRegister(e){
+async function handleRegister(e){
   e.preventDefault();
+  if(!DB_READY){ showAuthMsg('Still connecting to the database. Please wait a moment and try again.','error'); return false; }
   const name = document.getElementById('regName').value.trim();
   const username = document.getElementById('regUsername').value.trim().toLowerCase();
   const password = document.getElementById('regPassword').value;
@@ -624,43 +686,45 @@ function handleRegister(e){
     showAuthMsg('An account with this username already exists.','error');
     return false;
   }
-  const user = {id:uid('u'), name, username, password, role:'customer'};
+  const user = {id:uid('u'), name, username, passwordHash: await hashPassword(username, password), role:'customer', email:'', phone:''};
   DB.users.push(user);
-  saveDB(DB);
+  saveDB();
   switchAuthTab('login');
   document.getElementById('registerForm').reset();
   showAuthMsg('Account created! You can now log in.','ok');
   return false;
 }
 
-function handleLogin(e){
+async function handleLogin(e){
   e.preventDefault();
+  if(!DB_READY){ showAuthMsg('Still connecting to the database. Please wait a moment and try again.','error'); return false; }
   const username = document.getElementById('loginUsername').value.trim().toLowerCase();
-  const password = document.getElementById('loginPassword').value;
+  const hash = await hashPassword(username, document.getElementById('loginPassword').value);
 
-  const user = DB.users.find(u=>u.role==='customer' && u.username===username && u.password===password);
+  const user = DB.users.find(u=>u.role==='customer' && u.username===username && u.passwordHash===hash);
   if(!user){
     showAuthMsg('Invalid username or password.','error');
     return false;
   }
   currentUser = user;
-  sessionStorage.setItem('oaqms_current_user', JSON.stringify(user));
+  sessionStorage.setItem('oaqms_current_user', JSON.stringify({id:user.id}));
   enterApp();
   return false;
 }
 
-function handleAdminLogin(e){
+async function handleAdminLogin(e){
   e.preventDefault();
+  if(!DB_READY){ showAuthMsg('Still connecting to the database. Please wait a moment and try again.','error'); return false; }
   const username = document.getElementById('adminUsername').value.trim().toLowerCase();
-  const password = document.getElementById('adminPassword').value;
+  const hash = await hashPassword(username, document.getElementById('adminPassword').value);
 
-  const user = DB.users.find(u=>u.role==='admin' && u.username===username && u.password===password);
+  const user = DB.users.find(u=>u.role==='admin' && u.username===username && u.passwordHash===hash);
   if(!user){
     showAuthMsg('Invalid admin username or password.','error');
     return false;
   }
   currentUser = user;
-  sessionStorage.setItem('oaqms_current_user', JSON.stringify(user));
+  sessionStorage.setItem('oaqms_current_user', JSON.stringify({id:user.id}));
   enterApp();
   return false;
 }
@@ -1096,7 +1160,7 @@ function handleSaveProfile(e){
   u.name = name; u.email = email; u.phone = phone;
   saveDB(DB);
   currentUser = u;
-  sessionStorage.setItem('oaqms_current_user', JSON.stringify(u));
+  sessionStorage.setItem('oaqms_current_user', JSON.stringify({id:u.id}));
   document.getElementById('currentUserLabel').textContent = `${u.name} (${u.role})`;
   setMsg('profileMsg','Profile saved. You will receive notifications about your requests.','ok');
   return false;
@@ -1106,7 +1170,7 @@ function handleSaveProfile(e){
 const toastedIds = new Set();
 const NOTIF_ICONS = {submitted:'📨', approved:'✅', cancelled:'❌'};
 
-// This site has no server, so notices are delivered in-app. To also send real emails/SMS,
+// This site has no server, so notices are delivered in-app. To also send real emails/SMS
 
 /* ---- EmailJS setup: paste three values from https://dashboard.emailjs.com ---- */
 const EMAILJS_CONFIG = {
@@ -1279,27 +1343,28 @@ function initNotifications(){
   if(!hasContactInfo(currentUser)) showToast({type:'submitted', title:'Add your contact details', message:'Open My Profile and add an email or mobile number to get request updates.'});
 }
 
-// Pick up changes made in another tab (e.g. the admin approving a request).
-window.addEventListener('storage', e=>{
-  if(e.key !== DB_KEY) return;
-  DB = loadDB();
+// Called whenever data changes anywhere (another device, or this one).
+function onDataChanged(){
   if(!currentUser) return;
-  if(currentUser.role==='customer'){
+  const fresh = DB.users.find(u=>u.id===currentUser.id);
+  if(fresh) currentUser = fresh;
+  if(currentUser.role === 'customer'){
     myNotifications().filter(n=>!toastedIds.has(n.id)).forEach(n=>{ toastedIds.add(n.id); showToast(n); });
     updateNotifBadge();
   }
   const active = document.querySelector('.view.active');
-  if(active){
+  if(active && document.getElementById('appScreen').style.display !== 'none'){
     const id = active.id.replace('view-','');
     if(id!=='book' && id!=='profile') showView(id);
   }
-});
+}
 
 /* ---------------- INIT ---------------- */
-if(currentUser){
-  const fresh = DB.users.find(u=>u.id===currentUser.id);
-  if(fresh){ currentUser = fresh; enterApp(); }
-}
+showAuthMsg('Connecting to the database…','ok');
+if(window.fb) startCloud(); else window.addEventListener('fb-ready', startCloud, {once:true});
+setTimeout(()=>{
+  if(!DB_READY) showAuthMsg('Still connecting… Check your internet connection. If this continues, a browser extension or the Firestore rules may be blocking the database.','error');
+}, 12000);
 </script>
 </body>
 </html>
