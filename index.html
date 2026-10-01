@@ -816,7 +816,7 @@ function handleBook(e){
   DB.appointments.push(appt);
   saveDB(DB);
   addNotification(currentUser.id, 'submitted', 'Request submitted',
-    `Your request for "${service.name}" (${copies} ${copies>1?'copies':'copy'}) on ${date} at ${time} was submitted and is waiting for approval.`);
+    `Your request for "${service.name}" (${copies} ${copies>1?'copies':'copy'}) on ${date} at ${time} was submitted and is waiting for approval.`, {apptId: appt.id});
   setMsg('bookMsg', `Request submitted for ${date} at ${time}. Await confirmation from the school office.`, 'ok');
   e.target.reset();
   toggleOtherPurpose();
@@ -848,7 +848,7 @@ function cancelMyAppointment(id){
   if(q) q.status='cancelled';
   saveDB(DB);
   addNotification(appt.userId, 'cancelled', 'Request cancelled',
-    `You cancelled your request for "${appt.serviceName}" on ${appt.date} at ${appt.time}.`);
+    `You cancelled your request for "${appt.serviceName}" on ${appt.date} at ${appt.time}.`, {apptId: appt.id, by: 'student'});
   renderMyAppointments();
 }
 
@@ -946,7 +946,7 @@ function confirmAppointment(id){
   });
   saveDB(DB);
   addNotification(appt.userId, 'approved', 'Request approved',
-    `Your request for "${appt.serviceName}" on ${appt.date} at ${appt.time} was approved. Your queue number is #${DB.queueCounter}.`);
+    `Your request for "${appt.serviceName}" on ${appt.date} at ${appt.time} was approved. Your queue number is #${DB.queueCounter}.`, {apptId: appt.id, queueNumber: DB.queueCounter});
   renderApprovalsAdmin();
   renderAppointmentsAdmin();
 }
@@ -960,7 +960,7 @@ function cancelAppointmentAdmin(id){
   if(q) q.status='cancelled';
   saveDB(DB);
   addNotification(appt.userId, 'cancelled', wasPending ? 'Request not approved' : 'Request cancelled',
-    `Your request for "${appt.serviceName}" on ${appt.date} at ${appt.time} was ${wasPending ? 'rejected' : 'cancelled'} by the school office. Please contact the office or file a new request.`);
+    `Your request for "${appt.serviceName}" on ${appt.date} at ${appt.time} was ${wasPending ? 'rejected' : 'cancelled'} by the school office. Please contact the office or file a new request.`, {apptId: appt.id, by: 'office', wasPending});
   renderApprovalsAdmin();
   renderAppointmentsAdmin();
 }
@@ -1118,7 +1118,53 @@ const EMAILJS_CONFIG = {
 };
 // Which notification types also send a real email (submitted is off by default).
 const EMAIL_ON_TYPES = { approved: true, cancelled: true, submitted: false };
-const EMAIL_SUBJECTS = { approved: 'Your document request was approved', cancelled: 'Your document request was cancelled', submitted: 'Your document request was received' };
+const OFFICE_NAME = "Registrar's Office";   // shown at the end of every email
+
+// Builds the subject and body of the email for a notification.
+function buildEmail(notif, appt, user){
+  const first = ((user && user.name) || 'Student').split(' ')[0];
+  const doc = appt ? appt.serviceName : 'document';
+  const details = appt ? [
+    'REQUEST DETAILS',
+    `• Document: ${appt.serviceName}`,
+    `• Copies: ${appt.copies || 1}`,
+    `• Purpose: ${appt.purpose || '-'}`,
+    `• Preferred schedule: ${appt.date} at ${appt.time}`
+  ] : [];
+  const sign = ['', 'Thank you,', OFFICE_NAME];
+  let subject, lines;
+
+  if(notif.type === 'approved'){
+    subject = `Approved: your ${doc} request (Queue #${notif.queueNumber})`;
+    lines = [`Hi ${first},`, '', 'Good news! Your document request has been approved.', '', ...details,
+      `• Queue number: #${notif.queueNumber}`, '',
+      'WHAT TO DO NEXT',
+      `• Go to the school office on your scheduled date and time, and show your queue number (#${notif.queueNumber}) and valid school ID.`,
+      '• Open the "My Queue" tab on the system to see how many people are ahead of you.',
+      '• If you can no longer come, please cancel your request in the system so others can be served.', ...sign];
+  } else if(notif.type === 'cancelled' && notif.by === 'student'){
+    subject = `Confirmed: your ${doc} request was cancelled`;
+    lines = [`Hi ${first},`, '', 'This confirms that you cancelled your document request. No further action is needed.', '', ...details, '',
+      'Need the document later? You can file a new request anytime in the system.', ...sign];
+  } else if(notif.type === 'cancelled' && notif.wasPending){
+    subject = `Update: your ${doc} request could not be approved`;
+    lines = [`Hi ${first},`, '', 'We are sorry, but your document request could not be approved by the school office.', '', ...details, '',
+      'WHAT YOU CAN DO',
+      '• Visit or contact the school office to ask why and what is needed.',
+      '• File a new request in the system once the issue is settled.', ...sign];
+  } else if(notif.type === 'cancelled'){
+    subject = `Update: your ${doc} request was cancelled`;
+    lines = [`Hi ${first},`, '', 'Your document request was cancelled by the school office, and your queue number is no longer active.', '', ...details, '',
+      'WHAT YOU CAN DO',
+      '• Contact the school office if you think this was a mistake.',
+      '• File a new request in the system if you still need the document.', ...sign];
+  } else {
+    subject = `Received: your ${doc} request`;
+    lines = [`Hi ${first},`, '', 'We received your document request. It is now waiting for approval.', '', ...details, '',
+      'You will get another email once the school office approves or cancels it.', ...sign];
+  }
+  return {subject, body: lines.join('\n')};
+}
 
 function emailJsReady(){
   return !!(EMAILJS_CONFIG.serviceId && EMAILJS_CONFIG.templateId && EMAILJS_CONFIG.publicKey);
@@ -1138,6 +1184,8 @@ async function deliverExternal(notif){
   if(!notif.to || !notif.to.email) return;       // student has no email on file
   if(!emailJsReady()){ console.warn('EmailJS not configured: skipping email.'); return; }
   const u = DB.users.find(x=>x.id===notif.userId) || {};
+  const appt = DB.appointments.find(a=>a.id===notif.apptId);
+  const mail = buildEmail(notif, appt, u);
   try{
     const res = await fetch('https://api.emailjs.com/api/v1.0/email/send', {
       method: 'POST',
@@ -1149,9 +1197,9 @@ async function deliverExternal(notif){
         template_params: {
           to_email: notif.to.email,
           to_name: u.name || 'Student',
-          subject: EMAIL_SUBJECTS[notif.type] || notif.title,
+          subject: mail.subject,
           title: notif.title,
-          message: notif.message,
+          message: mail.body,
           status: notif.type
         }
       })
@@ -1165,11 +1213,12 @@ async function deliverExternal(notif){
 }
 
 
-function addNotification(userId, type, title, message){
+function addNotification(userId, type, title, message, extra){
   const u = DB.users.find(x=>x.id===userId);
   const notif = {
     id: uid('n'), userId, type, title, message,
     to: {email: (u&&u.email)||'', phone: (u&&u.phone)||''},
+    apptId: (extra && extra.apptId) || '', queueNumber: (extra && extra.queueNumber) || '', by: (extra && extra.by) || '', wasPending: !!(extra && extra.wasPending),
     read: false, createdAt: new Date().toISOString()
   };
   DB.notifications.push(notif);
