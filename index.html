@@ -1124,10 +1124,11 @@ function emailJsReady(){
   return !!(EMAILJS_CONFIG.serviceId && EMAILJS_CONFIG.templateId && EMAILJS_CONFIG.publicKey);
 }
 
-function setEmailStatus(notifId, status){
+function setEmailStatus(notifId, status, errorText){
   const n = DB.notifications.find(x=>x.id===notifId);
   if(!n) return;
   n.emailStatus = status;
+  n.emailError = errorText ? String(errorText).slice(0,160) : '';
   saveDB(DB);
   if(document.getElementById('view-notifications').classList.contains('active')) renderNotifications();
 }
@@ -1159,7 +1160,7 @@ async function deliverExternal(notif){
     setEmailStatus(notif.id, 'sent');
   }catch(err){
     console.warn('EmailJS send failed:', err);
-    setEmailStatus(notif.id, 'failed');
+    setEmailStatus(notif.id, 'failed', (err && err.message) || 'Network error or request blocked (check ad blocker / internet)');
   }
 }
 
@@ -1213,7 +1214,7 @@ function renderNotifications(){
       <div class="ico" aria-hidden="true">${NOTIF_ICONS[n.type]||'🔔'}</div>
       <div><div class="ttl">${escapeHtml(n.title)}</div>
       <div class="msg-t">${escapeHtml(n.message)}</div>
-      ${n.emailStatus==='sent' ? `<div class="when">📧 Email sent to ${escapeHtml(n.to.email)}</div>` : n.emailStatus==='failed' ? '<div class="when">⚠️ Email could not be sent</div>' : ''}
+      ${n.emailStatus==='sent' ? `<div class="when">📧 Email sent to ${escapeHtml(n.to.email)}</div>` : n.emailStatus==='failed' ? `<div class="when">⚠️ Email could not be sent${n.emailError ? ': ' + escapeHtml(n.emailError) : ''}</div>` : ''}
       <div class="when">${escapeHtml(new Date(n.createdAt).toLocaleString())}</div></div>
     </div>`).join('');
 }
