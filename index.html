@@ -1107,10 +1107,8 @@ const toastedIds = new Set();
 const NOTIF_ICONS = {submitted:'📨', approved:'✅', cancelled:'❌'};
 
 // This site has no server, so notices are delivered in-app. To also send real emails/SMS,
-// call an email/SMS service from here (e.g. EmailJS, Firebase Functions, or an SMS API)
-// using notif.to.email / notif.to.phone.
 
-/* ---- EmailJS setup: paste your three values from https://dashboard.emailjs.com ---- */
+/* ---- EmailJS setup: paste three values from https://dashboard.emailjs.com ---- */
 const EMAILJS_CONFIG = {
   serviceId:  'service_fiiciok',   // e.g. 'service_abc123'   (Email Services tab)
   templateId: 'template_qo84yzb',   // e.g. 'template_xyz789'  (Email Templates tab)
