@@ -626,8 +626,6 @@ function escapeHtml(value){
   return String(value ?? '').replace(/[&<>"']/g, ch => HTML_ESCAPE_MAP[ch]);
 }
 
-// Builds a table (or an empty-state message) from a row-rendering callback so each
-// admin/customer list view doesn't repeat its own markup + empty-check logic.
 function renderTable(container, headers, items, emptyMessage, rowFn, emptyIcon){
   const box = typeof container === 'string' ? document.getElementById(container) : container;
   if(!items.length){
@@ -1170,9 +1168,8 @@ function handleSaveProfile(e){
 const toastedIds = new Set();
 const NOTIF_ICONS = {submitted:'📨', approved:'✅', cancelled:'❌'};
 
-// This site has no server, so notices are delivered in-app. To also send real emails/SMS
 
-/* ---- EmailJS setup: paste three values from https://dashboard.emailjs.com ---- */
+
 const EMAILJS_CONFIG = {
   serviceId:  'service_fiiciok',   // e.g. 'service_abc123'   (Email Services tab)
   templateId: 'template_qo84yzb',   // e.g. 'template_xyz789'  (Email Templates tab)
